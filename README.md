@@ -7,7 +7,9 @@ page for each app, a graph of where your apps keep their files, and a quick
 switcher for everything.
 
 It's a 9 MB Tauri 2 app on the WebView2 engine that every Windows 10 and 11
-PC already has. Strata only reads folder listings and the registry:
+PC already has. **Download:** the [latest release](https://github.com/puss-in-boots-org/strata-desktop/releases/latest)
+has a 2 MB installer and a portable exe. They aren't code-signed yet, so
+Windows SmartScreen will ask before running them. Strata only reads folder listings and the registry:
 nothing leaves your PC, and it never deletes anything.
 
 ## What it offers
@@ -67,6 +69,13 @@ and `scripts\cargo-msvc.cmd` picks the right one for you:
 ```text
 scripts\cargo-msvc.cmd build --release
 target\release\strata-desktop.exe
+```
+
+The installer (`target\release\bundle\nsis\Strata_<version>_x64-setup.exe`)
+also needs Node.js, for the Tauri CLI:
+
+```text
+scripts\build-installer.cmd
 ```
 
 `strata-core` comes from the private `balong2000/strata` repo, so building
