@@ -1016,4 +1016,5 @@ function wire() {
 document.documentElement.dataset.theme = store("strata.theme") || "dark";
 wire();
 render();
+invoke("ui_ready").catch(() => {});
 loadInventory(false);
