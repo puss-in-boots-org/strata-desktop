@@ -1,0 +1,5 @@
+# strata-core comes from a private GitHub repo: let cargo fetch it with
+# the git command line, which uses your git sign-in (Git Credential
+# Manager / gh), instead of its built-in git, which has none.
+[net]
+git-fetch-with-cli = true

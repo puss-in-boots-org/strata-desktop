@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <title>Strata</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="ribbon" aria-label="Views">
+      <button class="rib active" data-view="apps" title="Apps (Ctrl+1)">
+        <svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+      </button>
+      <button class="rib" data-view="unclaimed" title="Unclaimed folders (Ctrl+2)">
+        <svg viewBox="0 0 24 24"><path d="M9 10h.01M15 10h.01"/><path d="M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8Z"/></svg>
+      </button>
+      <button class="rib" data-view="dev" title="Developer clutter (Ctrl+3)">
+        <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      </button>
+      <button class="rib" data-view="system" title="Hidden Windows space (Ctrl+4)">
+        <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      </button>
+      <button class="rib" data-view="graph" title="Graph view (Ctrl+5)">
+        <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="8" r="3"/><circle cx="10" cy="18" r="3"/><path d="m8.9 6.6 6.2 1M7.2 8.7l1.9 6.5M16.4 10.6l-4.3 5.6"/></svg>
+      </button>
+      <div class="rib-spacer"></div>
+      <button class="rib" id="btn-palette" title="Quick switcher (Ctrl+P)">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      </button>
+      <button class="rib" id="btn-rescan" title="Rescan (Ctrl+R)">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></svg>
+      </button>
+      <button class="rib" id="btn-theme" title="Light / dark theme">
+        <svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+      </button>
+    </nav>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="side-head">
+        <span class="side-title" id="side-title">Apps</span>
+        <span class="side-count" id="side-count"></span>
+      </div>
+      <div class="side-tools">
+        <input id="filter" placeholder="Filter…" spellcheck="false" autocomplete="off">
+        <button id="sort" class="chip-btn" title="Change sort order">size</button>
+      </div>
+      <div class="list" id="list" tabindex="0"></div>
+    </aside>
+    <div class="resizer" id="resizer" title="Drag to resize"></div>
+
+    <main class="main" id="main"></main>
+  </div>
+
+  <footer class="status">
+    <span id="status-left"></span>
+    <span class="status-right"><span id="status-drive"></span><kbd>Ctrl P</kbd></span>
+  </footer>
+
+  <div class="palette-backdrop" id="palette" hidden>
+    <div class="palette" role="dialog" aria-label="Quick switcher">
+      <input id="palette-input" placeholder="Find an app, a folder or a command…" spellcheck="false" autocomplete="off">
+      <div class="palette-results" id="palette-results"></div>
+      <div class="palette-hint"><kbd>↑</kbd><kbd>↓</kbd> move <kbd>Enter</kbd> open <kbd>Esc</kbd> close</div>
+    </div>
+  </div>
+
+  <div class="drop-overlay" id="drop"><div>Drop it to see which app it belongs to</div></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

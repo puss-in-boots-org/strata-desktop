@@ -1,0 +1,31 @@
+[package]
+name = "strata-desktop"
+version = "0.1.0"
+description = "Strata's desktop app: see which apps use your disk, and where"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["Szabó Balázs"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The scanner and attribution engine, from the Strata repo.
+strata-core = { git = "https://github.com/balong2000/strata", rev = "dbda3de4c8b95b6c36202c6ffa59c2509aff85d3" }
+
+[features]
+# Serve the front end from inside the exe (what release builds need).
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "strata-desktop"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
