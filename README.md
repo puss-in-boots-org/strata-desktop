@@ -1,65 +1,63 @@
 # Strata for Windows
 
 **The desktop app for [Strata](https://github.com/balong2000/strata): see
-exactly what is using your disk, and where, by app.** It has a quiet
-Obsidian-style interface: an icon ribbon, a filterable list, a note-like
-page for each app, a graph of where your apps keep their files, and a quick
-switcher for everything.
+exactly what is using your disk, and where, by app.** Every installed app
+and game is added up from all the places it keeps files, and every other
+byte on the drive is accounted for too.
 
 It's a 9 MB Tauri 2 app on the WebView2 engine that every Windows 10 and 11
 PC already has. **Download:** the [latest release](https://github.com/puss-in-boots-org/strata-desktop/releases/latest)
 has a 2 MB installer and a portable exe. They aren't code-signed yet, so
-Windows SmartScreen will ask before running them. Strata only reads folder listings and the registry:
-nothing leaves your PC, and it never deletes anything.
+Windows SmartScreen will ask before running them. Strata only reads folder
+listings and the registry: nothing leaves your PC, and it never deletes
+anything.
 
 ## What it offers
 
-### Apps, whole
-- Every installed app with its **real total**: the install folder plus its
-  `AppData`, `ProgramData`, `My Games`, shader caches and other folders,
-  wherever they are. A full scan takes about 2 seconds.
-- Each app's page shows its size, how much is **reclaimable** (cache, logs,
-  crash dumps, temp), a colour bar of **what kind of data** it is, and
-  **where it lives**, one row per folder. Each row says how sure the match
-  is and why.
-- One click opens any folder in Explorer.
+### The whole drive at a glance
+- **Overview:** a zoomable **sunburst** of the drive: games, apps, your
+  files, Windows, leftovers, what needs admin to read, and free space. Click
+  a ring to zoom in (animated), click the centre to zoom out; the legend
+  and breadcrumbs follow.
+- Cards for what you can win back: reclaimable app caches and logs, likely
+  leftovers, the Recycle Bin.
+
+### Games and apps from every source
+- Steam, Epic, **Xbox app / Game Pass** (DLC stubs folded into their game),
+  Microsoft Store apps by their real names, **Minecraft** launcher instances
+  (Modrinth, CurseForge, Prism) and everything with an uninstall entry.
+- **Games** is a grid of cards with Steam covers, Xbox logos and real app
+  icons; **Apps** is a sortable list with icons, sizes and what's
+  reclaimable.
+- Each game or app has its own page: artwork, its real total, a colour bar
+  of **what kind of data** it is (program, data, cache, logs, crash dumps,
+  temp), and **every place it lives**, with how sure the match is and why.
 
 ### The rest of the disk
-- **Overview:** how full each drive is, the biggest apps, and which places
-  (Program Files, AppData\Local...) hold the most.
-- **Unclaimed:** folders no installed app claims, with **possible
-  leftovers** from apps you've uninstalled flagged.
-- **Developer clutter:** Rust `target` folders, `node_modules`, venvs, build
-  output, package caches, SDKs and WSL/Docker disks. Each shows the command
-  that cleans it, with a copy button.
-- **Hidden Windows space:** hibernation and page files, WinSxS, update
-  caches, shader caches, the Recycle Bin and more. Each is marked safe,
-  use-the-Windows-tool, or keep, with how to shrink it.
+- **Your files** and **Windows & system**: folder explorers you can drill
+  into, from the drive's top folders down.
+- **Leftovers:** folders no installed app claims, with likely leftovers
+  (untouched for six months, or game folders a launcher no longer has
+  installed) flagged.
+- **Developer:** Rust `target` folders, `node_modules`, venvs, package
+  caches, SDKs and WSL/Docker disks, each with the command that cleans it.
+- **Hidden Windows space:** hibernation and page files, WinSxS, update and
+  shader caches and more, each marked safe, use-the-Windows-tool, or keep.
 
-### Obsidian-style, but simpler
-- **Graph view:** apps linked to the places their files live. Node size
-  is disk use, and hovering highlights a node's neighbours. Drag, zoom, and
-  click an app to open it.
-- **Quick switcher** (`Ctrl+P`): fuzzy search across apps, folders, dev
-  items, Windows items and commands.
-- **Drop any file or folder** on the window to see which app it belongs to.
-- Snappy and animated: the selection slides, bars grow, numbers count up,
-  and pages fade in. All of it stays under a quarter of a second, and it
-  turns off when Windows asks for reduced motion.
-- Dark and light themes, a resizable sidebar, and keyboard control
-  throughout.
+### Quick to get around
+- **Search** (`Ctrl+K`) across games, apps, leftovers, pages and commands.
+- **Drop any file or folder** on the window to see what it belongs to.
+- Dark and light themes, smooth but short animations (off when Windows asks
+  for reduced motion), and keyboard control throughout.
 
 ## Keyboard
 
 | Keys | Does |
 |---|---|
-| `Ctrl+P` / `Ctrl+K` | Quick switcher |
-| `Ctrl+1` ... `Ctrl+5` | Apps, Unclaimed, Developer clutter, Windows, Graph |
-| `↑` `↓` | Move through the list |
-| `Ctrl+F` | Filter the list |
+| `Ctrl+K` / `Ctrl+P` | Search |
+| `Ctrl+1` ... `Ctrl+7` | Overview, Games, Apps, Your files, Windows & system, Leftovers, Developer |
 | `Ctrl+R` | Rescan |
-| `Esc` | Close / back to the overview |
-
+| `Esc` / `Backspace` | Back: out of an app page, the sunburst or a folder |
 ## Building
 
 You need Rust (stable, MSVC) and Visual Studio 2022's C++ build tools with
@@ -85,7 +83,7 @@ after changing it.
 
 Layout:
 - `src/main.rs`: the Tauri commands (`inventory`, `dev_items`,
-  `system_items`, `list_drives`, `why`, `reveal`).
+  `system_items`, `list_drives`, `why`, `reveal`, `icon`).
 - `ui/`: plain HTML, CSS and JavaScript, no build step.
 
 ## License

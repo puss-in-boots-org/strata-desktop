@@ -1,6 +1,8 @@
 // No console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod icon;
+
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -80,6 +82,15 @@ fn why(state: State<'_, Cache>, path: String) -> Result<Option<Why>, String> {
     let guard = state.inventory.lock().unwrap();
     let inv = guard.as_ref().ok_or("still scanning")?;
     Ok(inv.why(&PathBuf::from(path)))
+}
+
+/// An app's icon or cover art as a data: URL (see icon.rs).
+#[tauri::command]
+async fn icon(path: String) -> Option<String> {
+    blocking(move || icon::data_url(std::path::Path::new(&path)))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The front end says it drew its first frame (logged, for diagnosing
@@ -170,10 +181,19 @@ fn main() {
             list_drives,
             why,
             reveal,
-            ui_ready
+            ui_ready,
+            icon
         ])
-        .setup(|_| {
+        .setup(|app| {
             log("window created");
+            // Starts hidden: shown here, unless a test runs it off-screen
+            // (STRATA_HIDDEN, driven over the DevTools protocol).
+            if std::env::var_os("STRATA_HIDDEN").is_none() {
+                if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!());

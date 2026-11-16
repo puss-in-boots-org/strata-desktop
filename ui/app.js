@@ -1,5 +1,7 @@
-// Strata desktop front end. Plain JS: views, the sidebar list, notes,
-// the graph, the quick switcher and drag-and-drop "which app is this?".
+// Strata desktop front end (0.2). Plain JS, no build step: a sidebar of
+// sections, an overview built around a zoomable sunburst of the drive,
+// game cards with real art, app pages, folder explorers, search (Ctrl+K)
+// and drag-and-drop "what does this belong to?".
 "use strict";
 
 const { invoke } = window.__TAURI__.core;
@@ -9,62 +11,18 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const KINDS = [
-  ["program", "Program"],
-  ["data", "Data"],
-  ["cache", "Cache"],
-  ["logs", "Logs"],
-  ["crash", "Crash dumps"],
-  ["temp", "Temp"],
-];
-const DEV_LABELS = {
-  "rust-target": "Rust build output",
-  "node-modules": "node_modules",
-  "python-venv": "Python virtual env",
-  "gradle-build": "Gradle build output",
-  "framework-cache": "Framework cache",
-  "global-cache": "Download cache",
-  toolchain: "Toolchain / SDK",
-  "virtual-disk": "Virtual disk",
-};
-const SAFETY = {
-  safe: ["Safe to empty", "ok"],
-  "use-windows-tool": ["Use the Windows tool", ""],
-  keep: ["Keep", "mute"],
-};
-const VIEWS = {
-  apps: "Apps",
-  unclaimed: "Unclaimed",
-  dev: "Developer clutter",
-  system: "Hidden Windows space",
-  graph: "Graph",
-};
-
-const state = {
-  view: "apps",
-  inv: null,
-  dev: null,
-  sys: null,
-  drives: [],
-  sel: {},
-  filter: "",
-  sort: "size",
-  scanning: false,
-  progress: "",
-  firstRender: {},
-};
-
-// ------------------------------------------------------------- helpers
-
 function human(b) {
   const u = ["B", "KB", "MB", "GB", "TB"];
   let v = b, i = 0;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  if (i === 0) return `${b} B`;
+  if (i === 0) return `${Math.round(b)} B`;
   return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${u[i]}`;
 }
+const fmt = (n) => Math.round(n).toLocaleString("en-US");
+const sum = (xs, f = (x) => x.size) => xs.reduce((s, x) => s + f(x), 0);
 const reclaim = (t) => t.by_kind.cache + t.by_kind.logs + t.by_kind.crash + t.by_kind.temp;
-const leaf = (p) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+const leaf = (p) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || String(p);
+const pct = (a, b) => (b > 0 ? (a / b) * 100 : 0);
 function ago(secs) {
   if (!secs) return "—";
   const d = Math.floor((Date.now() / 1000 - secs) / 86400);
@@ -74,8 +32,6 @@ function ago(secs) {
   if (d < 730) return `${Math.round(d / 30)} months ago`;
   return `${Math.round(d / 365)} years ago`;
 }
-const fmt = (n) => n.toLocaleString("en-US");
-
 function store(key, val) {
   try {
     if (val === undefined) return localStorage.getItem(key);
@@ -84,7 +40,7 @@ function store(key, val) {
 }
 
 let toastTimer;
-function toast(html, ms = 3200) {
+function toast(html, ms = 3400) {
   const t = $("#toast");
   t.innerHTML = html;
   t.classList.add("show");
@@ -92,713 +48,662 @@ function toast(html, ms = 3200) {
   toastTimer = setTimeout(() => t.classList.remove("show"), ms);
 }
 
-/** Count a number up to its value: sizes feel alive without being slow. */
-function countUp(el, to, formatter = human, ms = 450) {
+function countUp(el, to, f = human, ms = 500) {
   const start = performance.now();
   const step = (now) => {
     const p = Math.min(1, (now - start) / ms);
-    const e = 1 - Math.pow(1 - p, 3);
-    el.textContent = formatter(Math.round(to * e));
+    el.textContent = f(to * (1 - Math.pow(1 - p, 3)));
     if (p < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
 }
 
-/** Widths set after layout, so bars grow from zero. */
-function growBars(root) {
+/** Bars get their width after layout, so they grow in. */
+function animateIn(root) {
   requestAnimationFrame(() =>
-    requestAnimationFrame(() =>
-      root.querySelectorAll("[data-w]").forEach((el) => (el.style.width = el.dataset.w + "%")),
-    ),
+    requestAnimationFrame(() => root.querySelectorAll("[data-w]").forEach((el) => (el.style.width = el.dataset.w + "%"))),
   );
+  root.querySelectorAll("[data-count]").forEach((el) =>
+    countUp(el, +el.dataset.count, el.hasAttribute("data-plain") ? fmt : human),
+  );
+  hydrate(root);
 }
 
 const ICON = {
+  overview: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6.4 6.4"/></svg>',
+  back: '<svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>',
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>',
+  open: '<svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  code: '<svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
 };
 
-// ---------------------------------------------------------------- data
+// ---------------------------------------------------------------- model
 
-async function loadInventory(rescan) {
+/** Colour and name of each top-level slice of a drive. */
+const CATS = {
+  games: { label: "Games", hex: "#9d7bff", h: 258, s: 72, l: 70 },
+  apps: { label: "Apps", hex: "#4ea8ff", h: 210, s: 82, l: 62 },
+  files: { label: "Your files", hex: "#f2b84b", h: 40, s: 84, l: 62 },
+  system: { label: "Windows & system", hex: "#8792a6", h: 218, s: 14, l: 62 },
+  leftovers: { label: "Leftovers", hex: "#f07167", h: 4, s: 80, l: 66 },
+  unreadable: { label: "Not readable", css: "var(--c-unreadable)" },
+  free: { label: "Free space", css: "var(--c-free)" },
+};
+const AREA_CAT = {
+  files: "files", "recycle-bin": "files", "other-users": "files",
+  windows: "system", programs: "system", "app-data": "system",
+};
+const SOURCE = { steam: "Steam", epic: "Epic", xbox: "Xbox", minecraft: "Minecraft", registry: "PC", store: "Store" };
+const KINDS = [["program", "Program"], ["data", "Data"], ["cache", "Cache"], ["logs", "Logs"], ["crash", "Crash dumps"], ["temp", "Temp"]];
+const DEV_LABELS = {
+  "rust-target": "Rust build output", "node-modules": "node_modules", "python-venv": "Python virtual env",
+  "gradle-build": "Gradle build output", "framework-cache": "Framework cache", "global-cache": "Download cache",
+  toolchain: "Toolchain / SDK", "virtual-disk": "Virtual disk",
+};
+const SAFETY = { safe: ["Safe to empty", "ok"], "use-windows-tool": ["Use the Windows tool", ""], keep: ["Keep", "mute"] };
+
+const state = {
+  inv: null, trees: [], drive: 0, apps: new Map(),
+  page: "overview", detail: null, flashPath: null, prev: "overview",
+  dev: null, sys: null, scanning: false, progress: "", t0: 0,
+  filter: { games: "", apps: "" }, sort: { games: "size", apps: "size" }, onlyLikely: true,
+  explore: { files: [], system: [] },
+};
+
+/** One drive as a tree: categories, then apps/areas, then their parts and
+ *  folders. Each node gets a colour and its slice of the circle (x0..x1). */
+function buildTree(inv, d) {
+  const dk = d.root.slice(0, 2).toUpperCase();
+  const on = (p) => String(p).slice(0, 2).toUpperCase() === dk;
+  const fromNode = (n) => ({ name: n.name, size: n.totals.allocated, path: n.path, children: (n.children || []).map(fromNode) });
+  const appNode = (a) => {
+    const parts = a.parts.filter((p) => on(p.path));
+    return {
+      name: a.app.name, appId: a.app.id, size: sum(parts, (p) => p.totals.allocated),
+      children: parts.map((p) => ({ name: p.location, path: p.path, appId: a.app.id, size: p.totals.allocated })),
+    };
+  };
+  const cat = (id, children) => ({ name: CATS[id].label, cat: id, size: sum(children), children });
+  const areas = (c) => d.areas.filter((a) => AREA_CAT[a.kind] === c).map((a) => ({ ...fromNode(a.node), name: a.label }));
+  const root = {
+    name: d.root, root: true, size: d.total,
+    children: [
+      cat("games", inv.apps.filter((a) => a.app.game).map(appNode)),
+      cat("apps", inv.apps.filter((a) => !a.app.game).map(appNode)),
+      cat("files", areas("files")),
+      cat("system", areas("system")),
+      cat("leftovers", inv.unclaimed.filter((u) => on(u.path)).map((u) => ({ name: leaf(u.path), path: u.path, size: u.totals.allocated }))),
+      { name: "Not readable without admin", cat: "unreadable", size: d.unreadable },
+      { name: "Free space", cat: "free", size: d.free },
+    ],
+  };
+  layout(root, null, 0, 0, 1, null);
+  return root;
+}
+
+function layout(n, parent, depth, x0, x1, catId) {
+  Object.assign(n, { parent, depth, x0, x1 });
+  n.cat = n.cat || catId;
+  const c = CATS[n.cat];
+  if (depth === 1 || !c?.h) n.color = c?.hex || c?.css || "var(--faint)";
+  if (!n.children) return;
+  n.children = n.children.filter((k) => k.size > 0).sort((a, b) => b.size - a.size).slice(0, 60);
+  const total = n.root ? n.size : Math.max(n.size, sum(n.children));
+  let x = x0;
+  n.children.forEach((k, i) => {
+    const w = total > 0 ? ((x1 - x0) * k.size) / total : 0;
+    if (c?.h && depth >= 1) {
+      // Same hue as the category, a little darker each ring, alternating.
+      const l = c.l - depth * 7 + ((i % 4) - 1.5) * 4;
+      k.color = `hsl(${c.h} ${c.s}% ${Math.max(28, l)}%)`;
+    }
+    layout(k, n, depth + 1, x, x + w, n.cat || k.cat);
+    x += w;
+  });
+}
+
+function catNode(tree, id) {
+  return tree.children.find((c) => c.cat === id);
+}
+function allCat(id) {
+  return sum(state.trees, (t) => catNode(t, id)?.size || 0);
+}
+
+// ----------------------------------------------------------------- data
+
+async function load(rescan) {
   state.scanning = true;
-  state.progress = "Scanning";
+  state.t0 = performance.now();
+  state.progress = "Starting";
   $("#btn-rescan").classList.add("spinning");
-  renderStatus();
   if (!state.inv) render();
-  const t0 = performance.now();
+  renderSide();
+  const tick = setInterval(renderSide, 500);
   try {
-    const [inv, drives] = await Promise.all([invoke("inventory", { rescan }), invoke("list_drives")]);
+    const inv = await invoke("inventory", { rescan });
     state.inv = inv;
-    state.drives = drives;
+    state.apps = new Map(inv.apps.map((a) => [a.app.id, a]));
+    state.trees = inv.drives.map((d) => buildTree(inv, d));
+    state.drive = Math.max(0, inv.drives.reduce((b, d, i, a) => (d.total - d.free > a[b].total - a[b].free ? i : b), 0));
+    state.explore = { files: [], system: [] };
+    burst.focus = null;
     if (rescan) {
       state.dev = null;
       state.sys = null;
-      toast(`Rescanned in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+      toast(`Rescanned in ${((performance.now() - state.t0) / 1000).toFixed(1)} s`);
     }
   } catch (e) {
-    toast(`Scan failed: ${esc(e)}`, 6000);
+    toast(`Scan failed: ${esc(e)}`, 8000);
   } finally {
+    clearInterval(tick);
     state.scanning = false;
     $("#btn-rescan").classList.remove("spinning");
     render();
   }
 }
 
-async function ensureView(view) {
-  if (view === "dev" && !state.dev) {
-    state.progress = "Looking for build output and caches";
-    state.scanning = true;
-    renderStatus();
-    try { state.dev = await invoke("dev_items"); } catch (e) { toast(esc(e)); state.dev = { projects: [], global: [] }; }
-    state.scanning = false;
+async function ensure(page) {
+  const want = page === "dev" ? "dev" : page === "system" ? "sys" : null;
+  if (!want || state[want]) return;
+  try {
+    state[want] = want === "dev" ? await invoke("dev_items") : await invoke("system_items");
+  } catch (e) {
+    toast(esc(e));
+    state[want] = want === "dev" ? { projects: [], global: [] } : [];
   }
-  if (view === "system" && !state.sys) {
-    state.progress = "Measuring Windows folders";
-    state.scanning = true;
-    renderStatus();
-    try { state.sys = await invoke("system_items"); } catch (e) { toast(esc(e)); state.sys = []; }
-    state.scanning = false;
-  }
+  if (state.page === page) render();
 }
 
-// --------------------------------------------------------------- items
+// ---------------------------------------------------------------- images
 
-/** The sidebar's rows for the current view. */
-function items() {
-  const inv = state.inv;
-  if (!inv) return [];
-  switch (state.view) {
-    case "apps":
-      return inv.apps.map((a) => ({
-        id: a.app.id,
-        title: a.app.name,
-        size: a.totals.allocated,
-        rec: reclaim(a.totals),
-        sub: a.parts.length > 1 ? `${a.parts.length} places` : a.parts[0]?.location ?? "",
-        search: `${a.app.name} ${a.app.publisher ?? ""}`,
-      }));
-    case "unclaimed":
-      return inv.unclaimed.map((u) => ({
-        id: u.path,
-        title: leaf(u.path),
-        size: u.totals.allocated,
-        rec: 0,
-        sub: u.hint ?? u.location,
-        badge: u.possible_leftover ? ["leftover?", ""] : null,
-        search: `${u.path} ${u.hint ?? ""}`,
-      }));
-    case "dev": {
-      if (!state.dev) return [];
-      const all = [...state.dev.projects, ...state.dev.global];
-      return all.map((d) => ({
-        id: d.path,
-        title: d.project ? leaf(d.project) : leaf(d.path),
-        size: d.totals.allocated,
-        rec: d.reclaim === "rebuildable" ? d.totals.allocated : 0,
-        sub: DEV_LABELS[d.kind] ?? d.kind,
-        search: `${d.path} ${DEV_LABELS[d.kind] ?? ""}`,
-      }));
+const images = new Map();
+function imageFor(path) {
+  if (!images.has(path)) images.set(path, invoke("icon", { path }).catch(() => null));
+  return images.get(path);
+}
+const seen = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      seen.unobserve(e.target);
+      const img = e.target;
+      imageFor(img.dataset.src).then((url) => {
+        if (!url) return img.dispatchEvent(new Event("error"));
+        img.src = url;
+        img.onload = () => img.classList.add("on");
+      });
     }
-    case "system":
-      return (state.sys ?? [])
-        .filter((s) => s.totals.allocated > 0 || s.partial)
-        .map((s) => ({
-          id: s.name,
-          title: s.name,
-          size: s.totals.allocated,
-          rec: s.safety === "safe" ? s.totals.allocated : 0,
-          sub: SAFETY[s.safety][0],
-          badge: s.partial ? ["admin", "mute"] : null,
-          search: `${s.name} ${s.what}`,
-        }));
-    default:
-      return [];
-  }
-}
-
-function sortedFiltered() {
-  const q = state.filter.trim().toLowerCase();
-  let list = items();
-  if (q) list = list.filter((i) => i.search.toLowerCase().includes(q));
-  const by = {
-    size: (a, b) => b.size - a.size,
-    name: (a, b) => a.title.localeCompare(b.title),
-    reclaimable: (a, b) => b.rec - a.rec,
-  }[state.sort];
-  return list.sort(by);
-}
-
-// ------------------------------------------------------------- sidebar
-
-let pill;
-function renderList() {
-  const listEl = $("#list");
-  const showList = state.view !== "graph";
-  $("#sidebar").style.display = showList ? "" : "none";
-  $("#resizer").style.display = showList ? "" : "none";
-  if (!showList) return;
-
-  $("#side-title").textContent = VIEWS[state.view];
-  const rows = sortedFiltered();
-  $("#side-count").textContent = state.inv ? fmt(rows.length) : "";
-  const max = rows.reduce((m, r) => Math.max(m, r.size), 1);
-  const animate = !state.firstRender[state.view];
-  state.firstRender[state.view] = true;
-
-  if (!state.inv || (state.view === "dev" && !state.dev) || (state.view === "system" && !state.sys)) {
-    listEl.innerHTML = Array.from({ length: 12 }, () => '<div class="skeleton"></div>').join("");
-    return;
-  }
-  if (!rows.length) {
-    listEl.innerHTML = `<div class="empty-list">${state.filter ? "Nothing matches the filter." : "Nothing here."}</div>`;
-    return;
-  }
-  listEl.innerHTML =
-    '<div class="pill" id="pill"></div>' +
-    rows
-      .map((r, i) => {
-        const delay = animate ? `animation-delay:${Math.min(i * 12, 320)}ms` : "animation:none";
-        const badge = r.badge ? `<span class="badge ${r.badge[1]}">${esc(r.badge[0])}</span>` : "";
-        const shown = state.sort === "reclaimable" ? r.rec : r.size;
-        return `<div class="row" data-id="${esc(r.id)}" style="${delay}">
-          <span class="t">${esc(r.title)}${badge}</span><span class="s">${human(shown)}</span>
-          <span class="sub">${esc(r.sub)}</span>
-          <span class="meter"><i style="width:${Math.max(1.5, (r.size / max) * 100)}%;${animate ? "" : "animation:none"}"></i></span>
-        </div>`;
-      })
-      .join("");
-  pill = $("#pill");
-  movePill(false);
-}
-
-/** Slide the selection highlight to the selected row. */
-function movePill(smooth = true) {
-  if (!pill) return;
-  const id = state.sel[state.view];
-  const listEl = $("#list");
-  listEl.querySelectorAll(".row.selected").forEach((r) => r.classList.remove("selected"));
-  const row = id != null ? listEl.querySelector(`.row[data-id="${CSS.escape(id)}"]`) : null;
-  if (!row) {
-    pill.style.opacity = 0;
-    return;
-  }
-  row.classList.add("selected");
-  if (!smooth) pill.style.transition = "none";
-  pill.style.opacity = 1;
-  pill.style.transform = `translateY(${row.offsetTop}px)`;
-  pill.style.height = row.offsetHeight + "px";
-  if (!smooth) requestAnimationFrame(() => (pill.style.transition = ""));
-  const top = row.offsetTop, bottom = top + row.offsetHeight;
-  if (top < listEl.scrollTop) listEl.scrollTo({ top: top - 8, behavior: smooth ? "smooth" : "auto" });
-  else if (bottom > listEl.scrollTop + listEl.clientHeight)
-    listEl.scrollTo({ top: bottom - listEl.clientHeight + 8, behavior: smooth ? "smooth" : "auto" });
-}
-
-function select(id, opts = {}) {
-  state.sel[state.view] = id;
-  movePill(true);
-  renderMain(opts);
-}
-
-// ---------------------------------------------------------------- main
-
-function renderMain(opts = {}) {
-  const main = $("#main");
-  stopGraph();
-  if (!state.inv) {
-    main.innerHTML = `<div class="loading"><div class="box">
-      <div class="strata-mark"><i></i><i></i><i></i><i></i></div>
-      <div class="msg" id="load-msg">${esc(state.progress || "Scanning")}…</div></div></div>`;
-    return;
-  }
-  if (state.view === "graph") return renderGraph(main);
-  if ((state.view === "dev" && !state.dev) || (state.view === "system" && !state.sys)) {
-    main.innerHTML = `<article class="note"><h1>${esc(VIEWS[state.view])}</h1>
-      <p class="lede">Measuring…</p>${'<div class="skeleton"></div>'.repeat(6)}</article>`;
-    return;
-  }
-  const id = state.sel[state.view];
-  const html = {
-    apps: () => (id ? appNote(id) : overviewNote()),
-    unclaimed: () => (id ? unclaimedNote(id) : unclaimedOverview()),
-    dev: () => (id ? devNote(id) : devOverview()),
-    system: () => (id ? systemNote(id) : systemOverview()),
-  }[state.view]();
-  main.innerHTML = html ?? overviewNote();
-  main.scrollTop = 0;
-  growBars(main);
-  main.querySelectorAll("[data-count]").forEach((el) =>
-    countUp(el, +el.dataset.count, el.hasAttribute("data-plain") ? fmt : human),
-  );
-  if (opts.flashPath) {
-    const el = main.querySelector(`.part[data-path="${CSS.escape(opts.flashPath)}"]`);
-    if (el) { el.classList.add("flash"); el.scrollIntoView({ block: "center", behavior: "smooth" }); }
-  }
-}
-
-function kindBar(t) {
-  const total = Math.max(1, t.allocated);
-  const segs = KINDS.filter(([k]) => t.by_kind[k] > 0)
-    .map(([k]) => `<span style="background:var(--k-${k})" data-w="${(t.by_kind[k] / total) * 100}"></span>`)
-    .join("");
-  const legend = KINDS.filter(([k]) => t.by_kind[k] > 0)
-    .map(([k, l]) => `<span><i class="dot" style="background:var(--k-${k})"></i>${l}<b>${human(t.by_kind[k])}</b></span>`)
-    .join("");
-  return `<div class="kbar">${segs}</div><div class="legend">${legend}</div>`;
-}
-
-function prop(k, v) {
-  return v == null || v === "" ? "" : `<div class="prop"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
-}
-
-function partRow(p, i, size, where, conf, why) {
-  return `<div class="part" data-path="${esc(p)}" style="animation-delay:${Math.min(i * 30, 300)}ms">
-    <div class="size">${human(size)}</div>
-    <div><div class="where">${esc(where)}${conf ? `<span class="conf ${conf}">${conf}</span>` : ""}</div>
-      <div class="path">${esc(p)}</div>${why ? `<div class="why">${esc(why)}</div>` : ""}</div>
-    <button class="icon-btn" data-reveal="${esc(p)}" title="Show in Explorer">${ICON.folder}</button>
-  </div>`;
-}
-
-function appNote(id) {
-  const a = state.inv.apps.find((x) => x.app.id === id);
-  if (!a) return null;
-  const t = a.totals;
-  const src = { steam: "Steam", epic: "Epic Games", registry: "Installed program", store: "Microsoft Store" }[a.app.source];
-  return `<article class="note">
-    <h1>${esc(a.app.name)}</h1>
-    <p class="lede">${a.parts.length} ${a.parts.length === 1 ? "place" : "places"} on disk, ${fmt(t.files)} files</p>
-    <div class="big" data-count="${t.allocated}">0 B</div>
-    <div class="props">
-      ${prop("Reclaimable", `${human(reclaim(t))} <span class="conf">cache, logs, crash dumps, temp</span>`)}
-      ${prop("Publisher", esc(a.app.publisher))}
-      ${prop("Version", esc(a.app.version))}
-      ${prop("Source", esc(src))}
-      ${prop("Installer says", a.app.reported_bytes ? `${human(a.app.reported_bytes)} <span class="conf">install folder only</span>` : null)}
-      ${prop("Last changed", ago(t.newest))}
-      ${t.cloud_only ? prop("Cloud-only files", fmt(t.cloud_only)) : ""}
-    </div>
-    <h2>What it is</h2>${kindBar(t)}
-    <h2>Where it lives</h2>
-    <div class="parts">${a.parts
-      .map((p, i) => partRow(p.path, i, p.totals.allocated, p.location, p.confidence, p.reason))
-      .join("")}</div>
-  </article>`;
-}
-
-function overviewNote() {
-  const inv = state.inv;
-  const appsTotal = inv.apps.reduce((s, a) => s + a.totals.allocated, 0);
-  const rec = inv.apps.reduce((s, a) => s + reclaim(a.totals), 0);
-  const unc = inv.unclaimed.reduce((s, u) => s + u.totals.allocated, 0);
-  const drives = state.drives
-    .map((d) => {
-      const used = d.total - d.free, pct = d.total ? (used / d.total) * 100 : 0;
-      return `<div class="drive"><div class="head"><span>${esc(d.root)}</span>
-        <span>${human(d.free)} free of ${human(d.total)}</span></div>
-        <div class="track"><i class="${pct > 88 ? "hot" : ""}" data-w="${pct}"></i></div></div>`;
-    })
-    .join("");
-  const top = inv.apps.slice(0, 12);
-  const max = Math.max(1, top[0]?.totals.allocated ?? 1);
-  const bars = top
-    .map((a, i) => `<div class="hbar" data-open-app="${esc(a.app.id)}" style="animation-delay:${i * 25}ms">
-      <span class="n">${esc(a.app.name)}</span><div class="track"><i data-w="${(a.totals.allocated / max) * 100}"></i></div>
-      <span class="v">${human(a.totals.allocated)}</span></div>`)
-    .join("");
-  // Bytes by where they live, across every app.
-  const byLoc = {};
-  for (const a of inv.apps) for (const p of a.parts) {
-    const k = p.location.split("\\").slice(0, 2).join("\\");
-    byLoc[k] = (byLoc[k] ?? 0) + p.totals.allocated;
-  }
-  const locs = Object.entries(byLoc).sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const lmax = Math.max(1, locs[0]?.[1] ?? 1);
-  const locBars = locs
-    .map(([k, v], i) => `<div class="hbar" style="cursor:default;animation-delay:${i * 25}ms"><span class="n">${esc(k)}</span>
-      <div class="track"><i data-w="${(v / lmax) * 100}"></i></div><span class="v">${human(v)}</span></div>`)
-    .join("");
-  return `<article class="note">
-    <h1>Your disk</h1>
-    <p class="lede">Every app's files, wherever they are, added up.</p>
-    ${drives}
-    <div class="cards" style="margin-top:20px">
-      <div class="card"><div class="label">Apps</div><div class="value" data-count="${inv.apps.length}" data-plain>0</div></div>
-      <div class="card"><div class="label">Used by apps</div><div class="value" data-count="${appsTotal}">0 B</div></div>
-      <div class="card"><div class="label">Reclaimable</div><div class="value" data-count="${rec}">0 B</div></div>
-      <div class="card" data-goto="unclaimed" style="cursor:pointer"><div class="label">Unclaimed folders</div><div class="value" data-count="${unc}">0 B</div></div>
-    </div>
-    <h2>Biggest apps</h2><div class="bars">${bars}</div>
-    <h2>Where app files live</h2><div class="bars">${locBars}</div>
-    <div class="callout">Drop any file or folder on this window to see which app it belongs to. <kbd>Ctrl P</kbd> finds anything.</div>
-  </article>`;
-}
-
-function unclaimedNote(id) {
-  const u = state.inv.unclaimed.find((x) => x.path === id);
-  if (!u) return null;
-  return `<article class="note">
-    <h1>${esc(leaf(u.path))}${u.possible_leftover ? '<span class="badge">possible leftover</span>' : ""}</h1>
-    <p class="lede">No installed app claims this folder.</p>
-    <div class="big" data-count="${u.totals.allocated}">0 B</div>
-    <div class="props">
-      ${prop("What it probably is", esc(u.hint ?? "Unknown"))}
-      ${prop("Location", esc(u.location))}
-      ${prop("Files", fmt(u.totals.files))}
-      ${prop("Last changed", ago(u.totals.newest))}
-    </div>
-    <h2>What it is</h2>${kindBar(u.totals)}
-    <h2>Folder</h2><div class="parts">${partRow(u.path, 0, u.totals.allocated, u.location)}</div>
-    ${u.possible_leftover ? '<div class="callout">Nothing has changed here for six months and no installed app matches it: it is probably left over from an app you uninstalled. Check it in Explorer before removing it.</div>' : ""}
-  </article>`;
-}
-
-function unclaimedOverview() {
-  const list = state.inv.unclaimed;
-  const total = list.reduce((s, u) => s + u.totals.allocated, 0);
-  const left = list.filter((u) => u.possible_leftover);
-  const leftTotal = left.reduce((s, u) => s + u.totals.allocated, 0);
-  return `<article class="note"><h1>Unclaimed</h1>
-    <p class="lede">Folders in the usual app places that no installed app claims.</p>
-    <div class="cards">
-      <div class="card"><div class="label">Unclaimed</div><div class="value" data-count="${total}">0 B</div></div>
-      <div class="card"><div class="label">Possible leftovers</div><div class="value" data-count="${leftTotal}">0 B</div></div>
-    </div>
-    <div class="callout">Possible leftovers are unclaimed, not a known shared folder, and untouched for six months. Strata never deletes anything: check a folder before removing it yourself.</div>
-  </article>`;
-}
-
-function devItem(id) {
-  return [...state.dev.projects, ...state.dev.global].find((d) => d.path === id);
-}
-
-function noteHtml(note) {
-  return esc(note).replace(/`([^`]+)`/g, "<code>$1</code>");
-}
-
-function devNote(id) {
-  const d = devItem(id);
-  if (!d) return null;
-  const cmd = (d.note.match(/`([^`]+)`/) ?? [])[1];
-  return `<article class="note">
-    <h1>${esc(d.project ? leaf(d.project) : leaf(d.path))}</h1>
-    <p class="lede">${esc(DEV_LABELS[d.kind] ?? d.kind)}</p>
-    <div class="big" data-count="${d.totals.allocated}">0 B</div>
-    <div class="props">
-      ${prop("Project", d.project ? esc(d.project) : null)}
-      ${prop("Safe to delete", d.reclaim === "rebuildable" ? "Yes: it comes back on the next build or install" : "Use the tool that owns it")}
-      ${prop("Last touched", ago(d.totals.newest))}
-      ${prop("Files", fmt(d.totals.files))}
-    </div>
-    <div class="callout">${noteHtml(d.note)}
-      ${cmd ? `<button class="chip-btn" data-copy="${esc(cmd)}" style="margin-left:8px;height:24px">Copy command</button>` : ""}</div>
-    <h2>Folder</h2><div class="parts">${partRow(d.path, 0, d.totals.allocated, DEV_LABELS[d.kind] ?? "")}</div>
-  </article>`;
-}
-
-function devOverview() {
-  const p = state.dev.projects.reduce((s, d) => s + d.totals.allocated, 0);
-  const g = state.dev.global.reduce((s, d) => s + d.totals.allocated, 0);
-  return `<article class="note"><h1>Developer clutter</h1>
-    <p class="lede">Build output and dependencies in your projects, and the caches and toolchains behind them.</p>
-    <div class="cards">
-      <div class="card"><div class="label">In projects</div><div class="value" data-count="${p}">0 B</div></div>
-      <div class="card"><div class="label">Caches, SDKs, dev disks</div><div class="value" data-count="${g}">0 B</div></div>
-    </div>
-    <div class="callout">Projects are looked for in your user folder and <code>C:\\projects</code>.</div></article>`;
-}
-
-function systemNote(id) {
-  const s = (state.sys ?? []).find((x) => x.name === id);
-  if (!s) return null;
-  const [label, cls] = SAFETY[s.safety];
-  return `<article class="note">
-    <h1>${esc(s.name)}<span class="badge ${cls}">${esc(label)}</span></h1>
-    <p class="lede">${esc(s.what)}</p>
-    <div class="big" data-count="${s.totals.allocated}">0 B</div>
-    ${s.partial ? '<p class="lede">Part of it needs administrator rights to read, so the real size is bigger.</p>' : ""}
-    <div class="callout">${noteHtml(s.how)}</div>
-    <h2>Location</h2><div class="parts">${partRow(s.path, 0, s.totals.allocated, s.name)}</div>
-  </article>`;
-}
-
-function systemOverview() {
-  const all = state.sys ?? [];
-  const total = all.reduce((s, x) => s + x.totals.allocated, 0);
-  const safe = all.filter((x) => x.safety === "safe").reduce((s, x) => s + x.totals.allocated, 0);
-  return `<article class="note"><h1>Hidden Windows space</h1>
-    <p class="lede">What Windows itself keeps on the disk, and how to shrink it.</p>
-    <div class="cards">
-      <div class="card"><div class="label">Windows keeps</div><div class="value" data-count="${total}">0 B</div></div>
-      <div class="card"><div class="label">Safe to empty</div><div class="value" data-count="${safe}">0 B</div></div>
-    </div></article>`;
-}
-
-// --------------------------------------------------------------- graph
-
-let graph = null;
-
-function stopGraph() {
-  if (graph) {
-    cancelAnimationFrame(graph.raf);
-    graph.ro.disconnect();
-    graph = null;
-  }
-}
-
-/** Obsidian-style graph: apps linked to the places their files live. */
-function renderGraph(main) {
-  main.innerHTML = `<div class="graph-wrap"><canvas></canvas>
-    <div class="graph-hint">Scroll to zoom · drag to move · click an app to open it</div></div>`;
-  const canvas = $("canvas", main);
-  const ctx = canvas.getContext("2d");
-  const css = getComputedStyle(document.documentElement);
-  const col = (v) => css.getPropertyValue(v).trim();
-  const colors = { app: col("--k-data"), hub: col("--accent"), text: col("--text"), muted: col("--faint"), line: col("--border") };
-
-  const nodes = [], links = [], hubs = new Map();
-  const apps = state.inv.apps.slice(0, 70);
-  const maxSize = Math.max(1, apps[0]?.totals.allocated ?? 1);
-  const hubOf = (loc) => {
-    const key = loc.split("\\").slice(0, 2).join("\\");
-    if (!hubs.has(key)) {
-      const n = { id: "hub:" + key, label: key, hub: true, r: 9, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0, a: 1 };
-      hubs.set(key, n);
-      nodes.push(n);
-    }
-    return hubs.get(key);
-  };
-  for (const a of apps) {
-    const n = {
-      id: a.app.id, label: a.app.name, size: a.totals.allocated,
-      r: 3 + Math.sqrt(a.totals.allocated / maxSize) * 16,
-      x: (Math.random() - 0.5) * 500, y: (Math.random() - 0.5) * 500, vx: 0, vy: 0, a: 1,
+  },
+  { rootMargin: "300px" },
+);
+function hydrate(root) {
+  root.querySelectorAll("img[data-src]").forEach((img) => {
+    img.onerror = () => {
+      const ph = img.closest("[data-letter]");
+      if (ph && !ph.querySelector(".cover.on")) ph.innerHTML = `<span class="letter">${esc(ph.dataset.letter)}</span>`;
+      img.remove();
     };
-    nodes.push(n);
-    const seen = new Set();
-    for (const p of a.parts) {
-      const h = hubOf(p.location);
-      if (seen.has(h)) continue;
-      seen.add(h);
-      links.push({ s: n, t: h });
-    }
-  }
-  const nbrs = new Map(nodes.map((n) => [n, new Set()]));
-  for (const l of links) { nbrs.get(l.s).add(l.t); nbrs.get(l.t).add(l.s); }
-
-  // `auto` keeps the whole graph in view until you zoom or move it.
-  const g = (graph = { raf: 0, ro: null, zoom: 0.6, panX: 0, panY: 0, hover: null, drag: null, energy: 1, auto: true });
-  let W = 0, H = 0, dpr = 1;
-  const resize = () => {
-    dpr = window.devicePixelRatio || 1;
-    W = canvas.clientWidth; H = canvas.clientHeight;
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    g.energy = Math.max(g.energy, 0.3);
-  };
-  g.ro = new ResizeObserver(resize);
-  g.ro.observe(canvas);
-  resize();
-
-  const toWorld = (mx, my) => [(mx - W / 2 - g.panX) / g.zoom, (my - H / 2 - g.panY) / g.zoom];
-  const nodeAt = (mx, my) => {
-    const [x, y] = toWorld(mx, my);
-    let best = null, bd = Infinity;
-    for (const n of nodes) {
-      const d = Math.hypot(n.x - x, n.y - y);
-      if (d < n.r + 4 / g.zoom && d < bd) { best = n; bd = d; }
-    }
-    return best;
-  };
-
-  function tick() {
-    if (g.energy > 0.002) {
-      const k = 0.6 * g.energy;
-      for (let i = 0; i < nodes.length; i++) {
-        const a = nodes[i];
-        for (let j = i + 1; j < nodes.length; j++) {
-          const b = nodes[j];
-          let dx = a.x - b.x, dy = a.y - b.y;
-          let d2 = dx * dx + dy * dy + 0.01;
-          const f = (420 * k) / d2;
-          dx *= f; dy *= f;
-          a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
-        }
-      }
-      for (const l of links) {
-        const dx = l.t.x - l.s.x, dy = l.t.y - l.s.y;
-        const d = Math.hypot(dx, dy) || 1;
-        const f = ((d - 70) / d) * 0.02 * k * 10;
-        l.s.vx += dx * f; l.s.vy += dy * f; l.t.vx -= dx * f * 0.3; l.t.vy -= dy * f * 0.3;
-      }
-      for (const n of nodes) {
-        if (n === g.drag?.node) continue;
-        n.vx -= n.x * 0.002 * 10 * k; n.vy -= n.y * 0.002 * 10 * k;
-        n.vx *= 0.82; n.vy *= 0.82;
-        n.x += n.vx; n.y += n.vy;
-      }
-      g.energy *= 0.985;
-    }
-    if (g.auto && nodes.length) {
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const n of nodes) {
-        x0 = Math.min(x0, n.x - n.r); x1 = Math.max(x1, n.x + n.r);
-        y0 = Math.min(y0, n.y - n.r); y1 = Math.max(y1, n.y + n.r);
-      }
-      const z = Math.min(1.6, (W - 120) / (x1 - x0 || 1), (H - 100) / (y1 - y0 || 1));
-      g.zoom += (z - g.zoom) * 0.08;
-      g.panX += (-((x0 + x1) / 2) * g.zoom - g.panX) * 0.08;
-      g.panY += (-((y0 + y1) / 2) * g.zoom - g.panY) * 0.08;
-    }
-    // Hover fades everything but the node and its neighbours.
-    const focus = g.hover;
-    for (const n of nodes) {
-      const target = !focus || n === focus || nbrs.get(focus).has(n) ? 1 : 0.14;
-      n.a += (target - n.a) * 0.18;
-    }
-    draw();
-    g.raf = requestAnimationFrame(tick);
-  }
-
-  function draw() {
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, W, H);
-    ctx.translate(W / 2 + g.panX, H / 2 + g.panY);
-    ctx.scale(g.zoom, g.zoom);
-    ctx.lineWidth = 1 / g.zoom;
-    for (const l of links) {
-      const on = g.hover && (l.s === g.hover || l.t === g.hover);
-      ctx.globalAlpha = Math.min(l.s.a, l.t.a) * (on ? 0.9 : 0.45);
-      ctx.strokeStyle = on ? colors.hub : colors.line;
-      ctx.beginPath(); ctx.moveTo(l.s.x, l.s.y); ctx.lineTo(l.t.x, l.t.y); ctx.stroke();
-    }
-    for (const n of nodes) {
-      ctx.globalAlpha = n.a;
-      ctx.fillStyle = n.hub ? colors.hub : n === g.hover ? colors.hub : colors.app;
-      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.font = `${12 / g.zoom}px Segoe UI, system-ui, sans-serif`;
-    ctx.textAlign = "center";
-    for (const n of nodes) {
-      const show = n.hub || n === g.hover || (g.hover && nbrs.get(g.hover).has(n)) || n.r * g.zoom > 9;
-      if (!show) continue;
-      ctx.globalAlpha = n.a;
-      ctx.fillStyle = n.hub ? colors.text : colors.muted;
-      const label = n.size ? `${n.label} · ${human(n.size)}` : n.label;
-      ctx.fillText(label, n.x, n.y + n.r + 13 / g.zoom);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  canvas.addEventListener("mousemove", (e) => {
-    const r = canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
-    if (g.drag) {
-      if (g.drag.node) {
-        const [x, y] = toWorld(mx, my);
-        g.drag.node.x = x; g.drag.node.y = y; g.drag.node.vx = g.drag.node.vy = 0;
-        g.energy = Math.max(g.energy, 0.25);
-      } else {
-        g.panX = g.drag.px + (mx - g.drag.mx); g.panY = g.drag.py + (my - g.drag.my);
-      }
-      g.drag.moved = g.drag.moved || Math.hypot(mx - g.drag.mx, my - g.drag.my) > 3;
-      return;
-    }
-    g.hover = nodeAt(mx, my);
-    canvas.style.cursor = g.hover ? "pointer" : "grab";
+    seen.observe(img);
   });
-  canvas.addEventListener("mousedown", (e) => {
-    const r = canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
-    g.auto = false;
-    g.drag = { node: nodeAt(mx, my), mx, my, px: g.panX, py: g.panY, moved: false };
-    canvas.classList.add("dragging");
-  });
-  window.addEventListener("mouseup", () => {
-    if (!graph || graph !== g || !g.drag) return;
-    const { node, moved } = g.drag;
-    g.drag = null;
-    canvas.classList.remove("dragging");
-    if (node && !moved && !node.hub) {
-      setView("apps");
-      select(node.id);
-    }
-  });
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    g.auto = false;
-    const r = canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left - W / 2, my = e.clientY - r.top - H / 2;
-    const z = Math.min(4, Math.max(0.25, g.zoom * Math.exp(-e.deltaY * 0.0015)));
-    g.panX = mx - ((mx - g.panX) * z) / g.zoom;
-    g.panY = my - ((my - g.panY) * z) / g.zoom;
-    g.zoom = z;
-  }, { passive: false });
-
-  g.raf = requestAnimationFrame(tick);
+}
+function iconHtml(app, cls = "") {
+  const letter = (app.name.match(/[A-Za-z0-9]/) || ["?"])[0].toUpperCase();
+  return app.icon
+    ? `<span class="${cls}" data-letter="${esc(letter)}"><img data-src="${esc(app.icon)}" alt=""></span>`
+    : `<span class="${cls}" data-letter="${esc(letter)}"><span class="letter">${esc(letter)}</span></span>`;
 }
 
-// --------------------------------------------------------------- views
+// --------------------------------------------------------------- sidebar
+
+const PAGES = [
+  ["overview", "Overview"],
+  ["games", "Games"],
+  ["apps", "Apps"],
+  ["files", "Your files"],
+  ["system", "Windows & system"],
+  ["leftovers", "Leftovers"],
+  ["dev", "Developer"],
+];
+
+function renderSide() {
+  const used = state.inv ? sum(state.inv.drives, (d) => d.total - d.free) : 0;
+  const size = (id) => {
+    if (!state.inv) return "";
+    if (id === "overview") return human(used);
+    if (id === "dev") return state.dev ? human(sum([...state.dev.projects, ...state.dev.global], (x) => x.totals.allocated)) : "";
+    return human(allCat(id));
+  };
+  $("#nav").innerHTML = PAGES.map(([id, label], i) => {
+    const color = CATS[id]?.hex;
+    const mark = color ? `<span class="dotc" style="background:${color}"></span>` : id === "dev" ? ICON.code : ICON.overview;
+    const sep = i === 1 || i === 6 ? '<div class="nav-sep"></div>' : "";
+    return `${sep}<button class="nav-item ${state.page === id && !state.detail ? "active" : ""}" data-page="${id}">
+      ${mark}<span class="lbl">${esc(label)}</span><span class="sz">${size(id)}</span></button>`;
+  }).join("");
+  const s = $("#scan-state");
+  if (state.scanning) {
+    const secs = ((performance.now() - state.t0) / 1000).toFixed(0);
+    s.innerHTML = `<span class="spinner"></span>${esc(state.progress)}… ${secs} s`;
+    const lm = $("#load-msg");
+    if (lm) { lm.textContent = `${state.progress}…`; $("#load-time").textContent = `${secs} s`; }
+  } else if (state.inv) {
+    const files = state.inv.totals.files + sum(state.inv.drives, (d) => sum(d.areas, (a) => a.node.totals.files));
+    s.textContent = `${fmt(files)} files · ${state.inv.scan_seconds.toFixed(1)} s`;
+  } else s.textContent = "";
+}
+
+// ----------------------------------------------------------------- pages
+
+function go(page, opts = {}) {
+  if (state.detail) state.detail = null;
+  state.prev = state.page;
+  state.page = page;
+  render();
+  ensure(page);
+  if (!opts.keepScroll) $("#main").scrollTop = 0;
+}
+
+function openApp(id, flashPath) {
+  state.prev = state.page;
+  state.detail = id;
+  state.flashPath = flashPath || null;
+  render();
+  $("#main").scrollTop = 0;
+}
 
 function render() {
-  document.querySelectorAll(".rib[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
-  $("#sort").textContent = state.sort;
-  renderList();
-  renderMain();
-  renderStatus();
-}
-
-async function setView(view) {
-  if (state.view === view && view !== "graph") return;
-  state.view = view;
-  state.filter = "";
-  $("#filter").value = "";
-  render();
-  if ((view === "dev" && !state.dev) || (view === "system" && !state.sys)) {
-    await ensureView(view);
-    if (state.view === view) render();
-    else renderStatus();
+  renderSide();
+  const main = $("#main");
+  if (!state.inv) {
+    main.innerHTML = `<div class="loading"><div class="box"><div class="big"><i></i><i></i><i></i><i></i></div>
+      <div class="msg" id="load-msg">${esc(state.progress)}…</div><div class="time" id="load-time"></div></div></div>`;
+    return;
+  }
+  const html = state.detail ? appPage(state.detail) : PAGE_HTML[state.page]();
+  seen.disconnect(); // the old page's images are gone
+  main.innerHTML = `<div class="page">${html}</div>`;
+  if (!state.detail && state.page === "overview") burst.mount($("#burst"));
+  animateIn(main);
+  if (state.flashPath) {
+    const el = main.querySelector(`.part[data-path="${CSS.escape(state.flashPath)}"]`);
+    if (el) { el.classList.add("flash"); setTimeout(() => el.scrollIntoView({ block: "center", behavior: "smooth" }), 200); }
+    state.flashPath = null;
   }
 }
 
-function renderStatus() {
-  const left = $("#status-left");
-  if (state.scanning) {
-    left.innerHTML = `<span class="spinner"></span>${esc(state.progress)}…`;
-  } else if (state.inv) {
-    const i = state.inv;
-    left.textContent = `${fmt(i.apps.length)} apps · ${fmt(i.totals.files)} files · scanned in ${i.scan_seconds.toFixed(1)} s`;
-  } else left.textContent = "";
-  const c = state.drives.find((d) => /^C:/i.test(d.root)) ?? state.drives[0];
-  $("#status-drive").textContent = c ? `${c.root} ${human(c.free)} free` : "";
-  const msg = $("#load-msg");
-  if (msg) msg.textContent = `${state.progress || "Scanning"}…`;
+function head(title, sub, tools = "") {
+  return `<div class="head"><div><h1>${esc(title)}</h1><div class="sub">${sub}</div></div><div class="tools">${tools}</div></div>`;
 }
 
-// ------------------------------------------------------------ palette
+const PAGE_HTML = {
+  overview() {
+    const inv = state.inv;
+    const d = inv.drives[state.drive];
+    const t = state.trees[state.drive];
+    const used = d.total - d.free;
+    const drives = inv.drives.length > 1
+      ? `<div class="seg">${inv.drives.map((x, i) => `<button class="${i === state.drive ? "on" : ""}" data-drive="${i}">${esc(x.root.slice(0, 2))}</button>`).join("")}</div>`
+      : "";
+    const recycle = sum(d.areas.filter((a) => a.kind === "recycle-bin"), (a) => a.node.totals.allocated);
+    const rec = sum(inv.apps, (a) => reclaim(a.totals));
+    const likely = inv.unclaimed.filter((u) => u.possible_leftover);
+    const top = [...inv.apps].sort((a, b) => b.totals.allocated - a.totals.allocated).slice(0, 8);
+    const max = top[0]?.totals.allocated || 1;
+    return `${head("Overview", `${esc(d.root)} · ${human(used)} used of ${human(d.total)} · ${human(d.free)} free`, drives)}
+      <div class="ov">
+        <div class="panel burst-card"><div class="burst-top"><div class="crumbs" id="crumbs"></div></div><svg class="burst" id="burst" viewBox="0 0 520 520"></svg></div>
+        <div class="panel legend"><div class="stack">${t.children.filter((c) => c.cat !== "free")
+          .map((c) => `<span style="background:${c.color}" data-w="${pct(c.size, d.total)}"></span>`).join("")}</div>
+          <div id="legend"></div></div>
+      </div>
+      <div class="cards" style="margin-top:22px">
+        <div class="card link" data-go="apps" data-sort="reclaimable"><div class="label">Reclaimable in apps</div><div class="value" data-count="${rec}">0 B</div><div class="hint">cache, logs, crash dumps, temp</div></div>
+        <div class="card link" data-go="leftovers"><div class="label">Likely leftovers</div><div class="value" data-count="${sum(likely, (u) => u.totals.allocated)}">0 B</div><div class="hint">${likely.length} folders from uninstalled apps</div></div>
+        <div class="card link" data-go="files"><div class="label">Recycle Bin</div><div class="value" data-count="${recycle}">0 B</div><div class="hint">deleted, not yet emptied</div></div>
+        <div class="card"><div class="label">Not readable</div><div class="value" data-count="${d.unreadable}">0 B</div><div class="hint">needs admin (system folders)</div></div>
+      </div>
+      <h2 class="sec">Biggest apps and games</h2>
+      <div class="rows">${top.map((a, i) => appRow(a, max, i)).join("")}</div>`;
+  },
+
+  games() {
+    const list = sortFilter(state.inv.apps.filter((a) => a.app.game), "games");
+    const total = sum(list, (a) => a.totals.allocated);
+    return `${head("Games", `${list.length} games · ${human(total)}`, tools("games", [["size", "Size"], ["name", "Name"]]))}
+      <div class="grid">${list.map((a, i) => gameCard(a, i)).join("") || '<div class="empty">No games match.</div>'}</div>`;
+  },
+
+  apps() {
+    const list = sortFilter(state.inv.apps.filter((a) => !a.app.game), "apps");
+    const max = Math.max(1, ...list.map((a) => a.totals.allocated));
+    return `${head("Apps", `${list.length} apps · ${human(sum(list, (a) => a.totals.allocated))} · ${human(sum(list, (a) => reclaim(a.totals)))} reclaimable`,
+      tools("apps", [["size", "Size"], ["reclaimable", "Reclaimable"], ["name", "Name"]]))}
+      <div class="rows-head"><span></span><span>App</span><span></span><span>On disk</span><span>Reclaimable</span></div>
+      <div class="rows">${list.map((a, i) => appRow(a, max, i)).join("") || '<div class="empty">No apps match.</div>'}</div>`;
+  },
+
+  files: () => explorer("files", "Your files", "Documents, downloads, projects and every other folder of yours, plus the Recycle Bin and other accounts."),
+  system: () => explorer("system", "Windows & system", "Windows itself, shared program data no app claims, and leftover app data.") + systemItems(),
+
+  leftovers() {
+    const all = state.inv.unclaimed;
+    const list = all.filter((u) => !state.onlyLikely || u.possible_leftover);
+    const max = Math.max(1, ...list.map((u) => u.totals.allocated));
+    const seg = `<div class="seg"><button class="${state.onlyLikely ? "on" : ""}" data-likely="1">Likely leftovers</button><button class="${state.onlyLikely ? "" : "on"}" data-likely="0">All unclaimed</button></div>`;
+    return `${head("Leftovers", `${list.length} folders · ${human(sum(list, (u) => u.totals.allocated))}`, seg)}
+      <div class="callout">Folders in the usual app places that no installed app claims. <b>Likely leftovers</b> haven't changed in six months, or are game folders a launcher no longer has installed. Strata never deletes anything: check a folder before removing it.</div>
+      <div class="rows">${list.map((u, i) => folderRow({
+        name: leaf(u.path), path: u.path, size: u.totals.allocated,
+        sub: `${u.hint || u.location} · changed ${ago(u.totals.newest)}`,
+        badge: u.possible_leftover ? "leftover?" : "",
+      }, max, i)).join("") || '<div class="empty">Nothing here.</div>'}</div>`;
+  },
+
+  dev() {
+    if (!state.dev) return head("Developer", "Measuring build output and caches…") + '<div class="skeleton"></div>'.repeat(8);
+    const all = [...state.dev.projects, ...state.dev.global];
+    const max = Math.max(1, ...all.map((x) => x.totals.allocated));
+    const section = (title, xs) => `<h2 class="sec">${title}<span class="n">${human(sum(xs, (x) => x.totals.allocated))}</span></h2>
+      <div class="rows">${xs.map((x, i) => devRow(x, max, i)).join("") || '<div class="empty">Nothing found.</div>'}</div>`;
+    return head("Developer", "Build output and dependencies in your projects, and the caches, SDKs and virtual disks behind them.") +
+      section("In projects", state.dev.projects) + section("Caches, toolchains and dev disks", state.dev.global);
+  },
+};
+
+function tools(page, sorts) {
+  return `<input class="filter" data-filter="${page}" placeholder="Filter…" value="${esc(state.filter[page])}" spellcheck="false">
+    <div class="seg">${sorts.map(([k, l]) => `<button class="${state.sort[page] === k ? "on" : ""}" data-sort-page="${page}" data-sortk="${k}">${l}</button>`).join("")}</div>`;
+}
+
+function sortFilter(list, page) {
+  const q = state.filter[page].trim().toLowerCase();
+  if (q) list = list.filter((a) => `${a.app.name} ${a.app.publisher || ""} ${SOURCE[a.app.source]}`.toLowerCase().includes(q));
+  const by = {
+    size: (a, b) => b.totals.allocated - a.totals.allocated,
+    reclaimable: (a, b) => reclaim(b.totals) - reclaim(a.totals),
+    name: (a, b) => a.app.name.localeCompare(b.app.name),
+  }[state.sort[page]];
+  return [...list].sort(by);
+}
+
+const delay = (i) => `animation-delay:${Math.min(i * 18, 360)}ms`;
+
+function appRow(a, max, i) {
+  const sub = [a.app.publisher, `${a.parts.length} ${a.parts.length === 1 ? "place" : "places"}`].filter(Boolean).join(" · ");
+  const color = a.app.game ? CATS.games.hex : CATS.apps.hex;
+  return `<div class="row" data-app="${esc(a.app.id)}" style="${delay(i)}">
+    ${iconHtml(a.app, "ic")}
+    <div class="nm"><b>${esc(a.app.name)}</b><small>${esc(sub)}</small></div>
+    <div class="meter"><i style="background:${color}" data-w="${Math.max(1, pct(a.totals.allocated, max))}"></i></div>
+    <div class="v">${human(a.totals.allocated)}</div><div class="r">${human(reclaim(a.totals))}</div></div>`;
+}
+
+function gameCard(a, i) {
+  const art = a.app.cover
+    ? `<img class="cover" data-src="${esc(a.app.cover)}" alt="">`
+    : "";
+  return `<div class="game" data-app="${esc(a.app.id)}" style="${delay(i)}">
+    <div class="art" style="--hue:${CATS.games.hex}">
+      <div class="tile">${iconHtml(a.app)}</div>${art}
+      <span class="src">${esc(SOURCE[a.app.source] || "")}</span><span class="size">${human(a.totals.allocated)}</span>
+    </div>
+    <div class="gn">${esc(a.app.name)}</div><div class="gs">${esc(a.app.publisher || SOURCE[a.app.source] || "")}</div></div>`;
+}
+
+function folderRow(f, max, i, color = "var(--c-files)") {
+  return `<div class="row" ${f.drill != null ? `data-drill="${f.drill}"` : ""} style="${delay(i)}">
+    <span class="ic folder">${ICON.folder}</span>
+    <div class="nm"><b>${esc(f.name)}${f.badge ? `<span class="badge">${esc(f.badge)}</span>` : ""}</b><small>${esc(f.sub || f.path || "")}</small></div>
+    <div class="meter"><i style="background:${color}" data-w="${Math.max(1, pct(f.size, max))}"></i></div>
+    <div class="v">${human(f.size)}</div>
+    <div class="acts">${f.path ? `<button class="icon-btn" data-reveal="${esc(f.path)}" title="Show in Explorer">${ICON.open}</button>` : ""}</div></div>`;
+}
+
+function devRow(x, max, i) {
+  const cmd = (x.note.match(/`([^`]+)`/) || [])[1];
+  const name = x.project ? leaf(x.project) : leaf(x.path);
+  return `<div class="row" style="${delay(i)};cursor:default">
+    <span class="ic folder">${ICON.code}</span>
+    <div class="nm"><b>${esc(name)}<span class="badge ${x.reclaim === "rebuildable" ? "ok" : "mute"}">${esc(DEV_LABELS[x.kind] || x.kind)}</span></b>
+      <small>${esc(x.note.replace(/`/g, ""))} · touched ${ago(x.totals.newest)}</small></div>
+    <div class="meter"><i style="background:var(--accent)" data-w="${Math.max(1, pct(x.totals.allocated, max))}"></i></div>
+    <div class="v">${human(x.totals.allocated)}</div>
+    <div class="acts">${cmd ? `<button class="icon-btn" data-copy="${esc(cmd)}" title="Copy: ${esc(cmd)}">${ICON.copy}</button>` : ""}
+      <button class="icon-btn" data-reveal="${esc(x.path)}" title="Show in Explorer">${ICON.open}</button></div></div>`;
+}
+
+/** A drill-down list of one category's folder tree. */
+function explorer(page, title, sub) {
+  const root = catNode(state.trees[state.drive], page);
+  const stack = state.explore[page];
+  const cur = stack[stack.length - 1] || root;
+  const kids = cur.children || [];
+  const max = Math.max(1, ...kids.map((k) => k.size));
+  const crumbs = [root, ...stack].map((n, i) => `<button data-crumb="${page}:${i}">${esc(n.name)}</button>`).join("<span>›</span>");
+  const rows = kids.map((k, i) => folderRow({
+    name: k.name, path: k.path, size: k.size, drill: k.children?.length ? i : null,
+    sub: `${pct(k.size, cur.size).toFixed(1)}% · ${k.path ? k.path : ""}`,
+  }, max, i, CATS[page].hex)).join("");
+  const rest = cur.size - sum(kids);
+  return `${head(title, `${human(root.size)} on ${esc(state.inv.drives[state.drive].root)} · ${sub}`)}
+    <div class="crumbs" style="margin-bottom:10px">${crumbs}</div>
+    <div class="rows">${rows || '<div class="empty">No bigger folders inside.</div>'}</div>
+    ${rest > 1048576 && kids.length ? `<div class="empty" style="padding:10px 14px">+ ${human(rest)} in files here and folders under 8 MB</div>` : ""}`;
+}
+
+function systemItems() {
+  if (!state.sys) return `<h2 class="sec">Space Windows keeps</h2>${'<div class="skeleton"></div>'.repeat(4)}`;
+  const xs = state.sys.filter((s) => s.totals.allocated > 0 || s.partial);
+  return `<h2 class="sec">Space Windows keeps<span class="n">and how to shrink it</span></h2>
+    <div class="rows">${xs.map((s, i) => {
+      const [label, cls] = SAFETY[s.safety];
+      return `<div class="row" style="${delay(i)};cursor:default"><span class="ic folder">${ICON.folder}</span>
+        <div class="nm"><b>${esc(s.name)}<span class="badge ${cls}">${esc(label)}</span></b><small>${esc(s.what)} — ${esc(s.how.replace(/`/g, ""))}</small></div>
+        <div></div><div class="v">${s.partial && !s.totals.allocated ? "admin" : human(s.totals.allocated) + (s.partial ? "+" : "")}</div>
+        <div class="acts"><button class="icon-btn" data-reveal="${esc(s.path)}" title="Show in Explorer">${ICON.open}</button></div></div>`;
+    }).join("")}</div>`;
+}
+
+function appPage(id) {
+  const a = state.apps.get(id);
+  if (!a) return head("Not found", "This app is gone after the last scan.");
+  const t = a.totals;
+  const letter = (a.app.name.match(/[A-Za-z0-9]/) || ["?"])[0].toUpperCase();
+  const pic = a.app.cover && a.app.game
+    ? `<div class="pic cover" data-letter="${letter}"><img data-src="${esc(a.app.cover)}" alt=""></div>`
+    : `<div class="pic" data-letter="${letter}">${a.app.icon ? `<img data-src="${esc(a.app.icon)}" alt="">` : `<span class="letter">${letter}</span>`}</div>`;
+  const chips = [SOURCE[a.app.source], a.app.game ? "Game" : "App", a.app.publisher, a.app.version && `v${a.app.version}`]
+    .filter(Boolean).map((c) => `<span class="chip">${esc(c)}</span>`).join("");
+  const kinds = KINDS.filter(([k]) => t.by_kind[k] > 0);
+  return `<button class="back" data-back>${ICON.back}Back</button>
+    <div class="hero">${a.app.cover ? `<div class="bg" id="hero-bg"></div>` : ""}
+      <div class="inner">${pic}<div><h1>${esc(a.app.name)}</h1><div class="chips">${chips}</div></div>
+      <div class="bigsz"><div class="n" data-count="${t.allocated}">0 B</div><div class="s">${a.parts.length} ${a.parts.length === 1 ? "place" : "places"} · ${fmt(t.files)} files</div></div></div></div>
+    <div class="meta">
+      <div class="card"><div class="label">Reclaimable</div><div class="value">${human(reclaim(t))}</div><div class="hint">cache, logs, crash dumps, temp</div></div>
+      ${a.app.reported_bytes ? `<div class="card"><div class="label">Installer says</div><div class="value">${human(a.app.reported_bytes)}</div><div class="hint">install folder only</div></div>` : ""}
+      <div class="card"><div class="label">Last changed</div><div class="value">${ago(t.newest)}</div></div>
+      ${t.cloud_only ? `<div class="card"><div class="label">Cloud-only files</div><div class="value">${fmt(t.cloud_only)}</div></div>` : ""}
+    </div>
+    <h2 class="sec">What it is</h2>
+    <div class="kbar">${kinds.map(([k]) => `<span style="background:var(--k-${k})" data-w="${pct(t.by_kind[k], t.allocated)}"></span>`).join("")}</div>
+    <div class="klegend">${kinds.map(([k, l]) => `<span><i class="dot" style="background:var(--k-${k})"></i>${l}<b>${human(t.by_kind[k])}</b></span>`).join("")}</div>
+    <h2 class="sec">Where it lives</h2>
+    <div class="parts">${a.parts.map((p, i) => `<div class="part" data-path="${esc(p.path)}" style="${delay(i)}">
+      <div class="size">${human(p.totals.allocated)}</div>
+      <div><div class="where">${esc(p.location)}<span class="conf ${p.confidence}">${p.confidence}</span></div>
+        <div class="path">${esc(p.path)}</div><div class="why">${esc(p.reason)}</div></div>
+      <button class="icon-btn" data-reveal="${esc(p.path)}" title="Show in Explorer">${ICON.open}</button></div>`).join("")}</div>`;
+}
+
+// ---------------------------------------------------------------- burst
+
+/** The zoomable sunburst: three rings around the focused slice. Zooming
+ *  animates the angle window and the ring depth together. */
+const burst = {
+  svg: null, focus: null, cur: null, raf: 0, hover: null,
+  R: [92, 168, 216, 252], // ring edges: center hole, ring 1, 2, 3
+
+  mount(svg) {
+    this.svg = svg;
+    const t = state.trees[state.drive];
+    this.focus = this.focus && this.root() === t ? this.focus : t;
+    this.cur = { x0: this.focus.x0, x1: this.focus.x1, d: this.focus.depth };
+    this.nodes = [];
+    const walk = (n) => { this.nodes.push(n); n.el = null; (n.children || []).forEach(walk); };
+    walk(t);
+    svg.innerHTML = `<g id="arcs"></g><g class="center"><circle r="88" cx="260" cy="260" fill="transparent"/>
+      <text class="c-name" x="260" y="226" text-anchor="middle"></text>
+      <text class="c-size" x="260" y="266" text-anchor="middle"></text>
+      <text class="c-pct" x="260" y="290" text-anchor="middle"></text>
+      <text class="c-act" x="260" y="316" text-anchor="middle"></text></g>`;
+    svg.onmouseleave = () => this.setHover(null);
+    $(".center", svg).onclick = () => this.centerClick();
+    this.draw();
+    this.side();
+  },
+
+  root() {
+    let n = this.focus;
+    while (n?.parent) n = n.parent;
+    return n;
+  },
+
+  radius(level) {
+    const l = Math.max(0, Math.min(3, level));
+    const i = Math.min(2, Math.floor(l));
+    return this.R[i] + (this.R[i + 1] - this.R[i]) * (l - i);
+  },
+
+  arc(a0, a1, r0, r1) {
+    a1 = Math.min(a1, a0 + Math.PI * 2 - 1e-4);
+    const p = (a, r) => `${(260 + r * Math.sin(a)).toFixed(2)} ${(260 - r * Math.cos(a)).toFixed(2)}`;
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    return `M${p(a0, r1)}A${r1} ${r1} 0 ${large} 1 ${p(a1, r1)}L${p(a1, r0)}A${r0} ${r0} 0 ${large} 0 ${p(a0, r0)}Z`;
+  },
+
+  draw() {
+    const { x0, x1, d } = this.cur;
+    const g = $("#arcs", this.svg);
+    const span = x1 - x0;
+    for (const n of this.nodes) {
+      const rel = n.depth - d;
+      const a0 = Math.max(0, Math.min(1, (n.x0 - x0) / span)) * Math.PI * 2;
+      const a1 = Math.max(0, Math.min(1, (n.x1 - x0) / span)) * Math.PI * 2;
+      const r0 = this.radius(rel - 1) + 1, r1 = this.radius(rel);
+      const show = rel > 0.01 && rel <= 3.01 && a1 - a0 > 0.004 && r1 - r0 > 0.5;
+      if (!show) { if (n.el) n.el.style.display = "none"; continue; }
+      if (!n.el) {
+        n.el = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        n.el.style.fill = n.color;
+        if (n.cat === "free") n.el.style.fill = "var(--c-free)";
+        n.el.onmouseenter = (e) => this.setHover(n, e);
+        n.el.onmousemove = (e) => moveTip(e);
+        n.el.onclick = () => this.click(n);
+        g.appendChild(n.el);
+      }
+      n.el.style.display = "";
+      n.el.setAttribute("d", this.arc(a0, a1, r0, r1));
+    }
+    this.label(this.hover || this.focus);
+  },
+
+  label(n) {
+    const t = this.root();
+    const [name, size, p, act] = this.svg.querySelectorAll(".center text");
+    name.textContent = n.root ? `${n.name} drive` : n.name.length > 26 ? n.name.slice(0, 25) + "…" : n.name;
+    size.textContent = human(n.root ? t.size - (catNode(t, "free")?.size || 0) : n.size);
+    p.textContent = n.root ? `used of ${human(t.size)}` : `${pct(n.size, t.size).toFixed(1)}% of the drive`;
+    act.textContent = n === this.hover ? (n.children?.length ? "click to zoom in" : n.appId ? "click to open" : "")
+      : n.appId && n.depth === 2 ? "open app ›" : n !== t ? "‹ zoom out" : "";
+  },
+
+  setHover(n, e) {
+    this.hover = n;
+    this.svg.classList.toggle("hovering", !!n);
+    for (const x of this.nodes) if (x.el) x.el.classList.toggle("hl", x === n);
+    this.label(n || this.focus);
+    const tip = $("#tip");
+    if (!n) return tip.classList.remove("show");
+    tip.innerHTML = `<b>${esc(n.name)}</b><span>${human(n.size)} · ${pct(n.size, n.parent?.size || n.size).toFixed(1)}% of ${esc(n.parent?.name || "")}</span>`;
+    tip.classList.add("show");
+    if (e) moveTip(e);
+  },
+
+  click(n) {
+    if (n.children?.length) return this.zoom(n);
+    if (n.appId) return openApp(n.appId, n.path);
+    if (n.cat === "leftovers" && n.depth === 2) return go("leftovers");
+  },
+
+  centerClick() {
+    const f = this.focus;
+    if (f.appId && f.depth === 2) return openApp(f.appId);
+    if (f.parent) this.zoom(f.parent);
+  },
+
+  zoom(n) {
+    this.focus = n;
+    this.setHover(null);
+    const from = { ...this.cur }, to = { x0: n.x0, x1: n.x1, d: n.depth };
+    const t0 = performance.now(), ms = 520;
+    cancelAnimationFrame(this.raf);
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / ms);
+      const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+      this.cur = { x0: from.x0 + (to.x0 - from.x0) * e, x1: from.x1 + (to.x1 - from.x1) * e, d: from.d + (to.d - from.d) * e };
+      this.draw();
+      if (p < 1) this.raf = requestAnimationFrame(step);
+    };
+    this.raf = requestAnimationFrame(step);
+    this.side();
+  },
+
+  /** Breadcrumbs above, and the legend beside, follow the focus. */
+  side() {
+    const chain = [];
+    for (let n = this.focus; n; n = n.parent) chain.unshift(n);
+    $("#crumbs").innerHTML = chain.map((n, i) => `<button data-zoom="${i}">${esc(n.root ? n.name : n.name)}</button>`).join("<span>›</span>");
+    $("#crumbs").querySelectorAll("[data-zoom]").forEach((b) => (b.onclick = () => this.zoom(chain[+b.dataset.zoom])));
+    const f = this.focus;
+    const kids = (f.children || []).slice(0, 12);
+    const base = f.root ? f.size : f.size;
+    $("#legend").innerHTML = kids.map((k, i) => `<div class="lg-row" data-lg="${i}" style="${delay(i)}">
+      <span class="sw" style="background:${k.cat === "free" ? "var(--c-free)" : k.color}"></span>
+      <span class="nm">${esc(k.name)}<small>${k.children?.length ? `${k.children.length} inside` : k.appId ? "open" : ""}</small></span>
+      <span class="v">${human(k.size)}</span><span class="p">${pct(k.size, base).toFixed(1)}%</span></div>`).join("");
+    $("#legend").querySelectorAll("[data-lg]").forEach((r) => {
+      const k = kids[+r.dataset.lg];
+      r.onclick = () => (k.cat && k.depth === 1 && !k.children?.length ? null : this.click(k));
+      r.onmouseenter = () => { this.setHover(k); $("#tip").classList.remove("show"); };
+      r.onmouseleave = () => this.setHover(null);
+    });
+  },
+};
+
+function moveTip(e) {
+  const tip = $("#tip");
+  tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - 12, e.clientX + 14) + "px";
+  tip.style.top = e.clientY + 16 + "px";
+}
+
+// --------------------------------------------------------------- search
 
 const pal = { open: false, results: [], active: 0 };
 
 function paletteEntries() {
-  const out = [
-    { k: "Command", t: "Rescan", run: () => loadInventory(true) },
-    { k: "Command", t: "Toggle light / dark theme", run: toggleTheme },
-    { k: "Command", t: "Open graph view", run: () => setView("graph") },
-    { k: "Command", t: "Show possible leftovers", run: () => setView("unclaimed") },
-  ];
+  const out = PAGES.map(([id, label]) => ({ k: "Go to", t: label, run: () => go(id) }));
+  out.push({ k: "Command", t: "Rescan", run: () => !state.scanning && load(true) });
+  out.push({ k: "Command", t: "Toggle light / dark theme", run: toggleTheme });
   if (!state.inv) return out;
   for (const a of state.inv.apps)
-    out.push({ k: "App", t: a.app.name, s: human(a.totals.allocated), run: () => { setView("apps"); select(a.app.id); } });
+    out.push({ k: a.app.game ? "Game" : "App", t: a.app.name, s: human(a.totals.allocated), run: () => openApp(a.app.id) });
   for (const u of state.inv.unclaimed)
-    out.push({ k: "Folder", t: u.path, s: human(u.totals.allocated), run: () => { setView("unclaimed"); select(u.path); } });
-  for (const d of state.dev ? [...state.dev.projects, ...state.dev.global] : [])
-    out.push({ k: "Dev", t: d.path, s: human(d.totals.allocated), run: async () => { await setView("dev"); select(d.path); } });
-  for (const s of state.sys ?? [])
-    out.push({ k: "Windows", t: s.name, s: human(s.totals.allocated), run: async () => { await setView("system"); select(s.name); } });
+    out.push({ k: "Leftover", t: u.path, s: human(u.totals.allocated), run: () => { state.onlyLikely = false; go("leftovers"); } });
   return out;
 }
 
-/** Subsequence match; earlier and tighter matches score higher. */
 function fuzzy(q, text) {
   if (!q) return { score: 0, marks: [] };
   const t = text.toLowerCase();
@@ -816,11 +721,6 @@ function fuzzy(q, text) {
   return { score: score - marks[0] * 0.05 - text.length * 0.002, marks };
 }
 
-function highlight(text, marks) {
-  const set = new Set(marks);
-  return [...text].map((c, i) => (set.has(i) ? `<mark>${esc(c)}</mark>` : esc(c))).join("");
-}
-
 function updatePalette() {
   const q = $("#palette-input").value.trim().toLowerCase();
   const scored = [];
@@ -835,88 +735,93 @@ function updatePalette() {
 }
 
 function drawPalette() {
-  $("#palette-results").innerHTML =
-    pal.results
-      .map((r, i) => `<div class="pr ${i === pal.active ? "active" : ""}" data-i="${i}">
-        <span class="k">${esc(r.k)}</span><span class="t">${highlight(r.t, r.marks)}</span><span class="s">${esc(r.s ?? "")}</span></div>`)
-      .join("") || '<div class="empty-list">No matches.</div>';
+  const hl = (text, marks) => { const s = new Set(marks); return [...text].map((c, i) => (s.has(i) ? `<mark>${esc(c)}</mark>` : esc(c))).join(""); };
+  $("#palette-results").innerHTML = pal.results.map((r, i) => `<div class="pr ${i === pal.active ? "active" : ""}" data-i="${i}">
+    <span class="k">${esc(r.k)}</span><span class="t">${hl(r.t, r.marks)}</span><span class="s">${esc(r.s || "")}</span></div>`).join("")
+    || '<div class="empty">No matches.</div>';
   $("#palette-results .pr.active")?.scrollIntoView({ block: "nearest" });
 }
 
 function openPalette() {
   pal.open = true;
   $("#palette").hidden = false;
-  const input = $("#palette-input");
-  input.value = "";
+  $("#palette-input").value = "";
   updatePalette();
-  input.focus();
+  $("#palette-input").focus();
 }
-function closePalette() {
-  pal.open = false;
-  $("#palette").hidden = true;
-}
-function runPalette(i) {
-  const r = pal.results[i];
-  closePalette();
-  r?.run();
-}
-
-// -------------------------------------------------------------- theme
+function closePalette() { pal.open = false; $("#palette").hidden = true; }
+function runPalette(i) { const r = pal.results[i]; closePalette(); r?.run(); }
 
 function toggleTheme() {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   document.documentElement.dataset.theme = next;
   store("strata.theme", next);
-  if (state.view === "graph") renderMain();
+  if (state.inv && !state.detail && state.page === "overview") render();
 }
 
-// ------------------------------------------------------------- events
+// ---------------------------------------------------------------- events
 
 function wire() {
-  document.querySelectorAll(".rib[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
-  $("#btn-palette").addEventListener("click", openPalette);
-  $("#btn-rescan").addEventListener("click", () => !state.scanning && loadInventory(true));
-  $("#btn-theme").addEventListener("click", toggleTheme);
+  $("#nav").addEventListener("click", (e) => { const b = e.target.closest("[data-page]"); if (b) go(b.dataset.page); });
+  $("#btn-search").onclick = openPalette;
+  $("#btn-rescan").onclick = () => !state.scanning && load(true);
+  $("#btn-theme").onclick = toggleTheme;
 
-  $("#filter").addEventListener("input", (e) => {
-    state.filter = e.target.value;
-    renderList();
-  });
-  $("#filter").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      const first = sortedFiltered()[0];
-      if (first) select(first.id);
-    }
-  });
-  $("#sort").addEventListener("click", () => {
-    const order = state.view === "apps" ? ["size", "reclaimable", "name"] : ["size", "name"];
-    state.sort = order[(order.indexOf(state.sort) + 1) % order.length];
-    $("#sort").textContent = state.sort;
-    renderList();
-  });
-
-  $("#list").addEventListener("click", (e) => {
-    const row = e.target.closest(".row");
-    if (row) select(row.dataset.id);
-  });
-
-  $("#main").addEventListener("click", async (e) => {
-    const rev = e.target.closest("[data-reveal]");
+  const main = $("#main");
+  main.addEventListener("click", async (e) => {
+    const t = e.target;
+    const rev = t.closest("[data-reveal]");
     if (rev) {
+      e.stopPropagation();
       try { await invoke("reveal", { path: rev.dataset.reveal }); } catch (err) { toast(esc(err)); }
       return;
     }
-    const cp = e.target.closest("[data-copy]");
+    const cp = t.closest("[data-copy]");
     if (cp) {
-      try { await navigator.clipboard.writeText(cp.dataset.copy); toast(`Copied <code>${esc(cp.dataset.copy)}</code>`); }
-      catch { toast("Couldn't copy"); }
+      try { await navigator.clipboard.writeText(cp.dataset.copy); toast(`Copied <code>${esc(cp.dataset.copy)}</code>`); } catch { toast("Couldn't copy"); }
       return;
     }
-    const app = e.target.closest("[data-open-app]");
-    if (app) return select(app.dataset.openApp);
-    const go = e.target.closest("[data-goto]");
-    if (go) return setView(go.dataset.goto);
+    if (t.closest("[data-back]")) { state.detail = null; render(); return; }
+    const app = t.closest("[data-app]");
+    if (app) return openApp(app.dataset.app);
+    const g = t.closest("[data-go]");
+    if (g) { if (g.dataset.sort) state.sort.apps = g.dataset.sort; return go(g.dataset.go); }
+    const drill = t.closest("[data-drill]");
+    if (drill) {
+      const page = state.page;
+      const stack = state.explore[page];
+      const cur = stack[stack.length - 1] || catNode(state.trees[state.drive], page);
+      stack.push(cur.children[+drill.dataset.drill]);
+      return render();
+    }
+    const crumb = t.closest("[data-crumb]");
+    if (crumb) { const [page, i] = crumb.dataset.crumb.split(":"); state.explore[page].length = +i; return render(); }
+    const sortb = t.closest("[data-sortk]");
+    if (sortb) { state.sort[sortb.dataset.sortPage] = sortb.dataset.sortk; return render(); }
+    const lk = t.closest("[data-likely]");
+    if (lk) { state.onlyLikely = lk.dataset.likely === "1"; return render(); }
+    const dr = t.closest("[data-drive]");
+    if (dr) { state.drive = +dr.dataset.drive; burst.focus = null; state.explore = { files: [], system: [] }; return render(); }
   });
+  main.addEventListener("input", (e) => {
+    const f = e.target.closest("[data-filter]");
+    if (!f) return;
+    state.filter[f.dataset.filter] = f.value;
+    const pos = f.selectionStart;
+    render();
+    const again = $(`[data-filter="${f.dataset.filter}"]`);
+    again.focus();
+    again.setSelectionRange(pos, pos);
+  });
+  // The hero's blurred backdrop is the app's cover art.
+  new MutationObserver(() => {
+    const bg = $("#hero-bg");
+    const a = state.detail && state.apps.get(state.detail);
+    if (bg && a?.app.cover && !bg.dataset.done) {
+      bg.dataset.done = "1";
+      imageFor(a.app.cover).then((url) => url && (bg.style.backgroundImage = `url("${url}")`));
+    }
+  }).observe(main, { childList: true });
 
   $("#palette").addEventListener("mousedown", (e) => { if (e.target.id === "palette") closePalette(); });
   $("#palette-input").addEventListener("input", updatePalette);
@@ -924,10 +829,7 @@ function wire() {
     const r = e.target.closest(".pr");
     if (r && +r.dataset.i !== pal.active) { pal.active = +r.dataset.i; drawPalette(); }
   });
-  $("#palette-results").addEventListener("click", (e) => {
-    const r = e.target.closest(".pr");
-    if (r) runPalette(+r.dataset.i);
-  });
+  $("#palette-results").addEventListener("click", (e) => { const r = e.target.closest(".pr"); if (r) runPalette(+r.dataset.i); });
 
   document.addEventListener("keydown", (e) => {
     const ctrl = e.ctrlKey || e.metaKey;
@@ -938,47 +840,17 @@ function wire() {
       else if (e.key === "Enter") runPalette(pal.active);
       return;
     }
-    if (ctrl && ["p", "o", "k"].includes(e.key.toLowerCase())) { e.preventDefault(); openPalette(); return; }
-    if (ctrl && e.key.toLowerCase() === "r") { e.preventDefault(); if (!state.scanning) loadInventory(true); return; }
-    if (ctrl && e.key.toLowerCase() === "f") { e.preventDefault(); $("#filter").focus(); return; }
-    if (ctrl && /^[1-5]$/.test(e.key)) { e.preventDefault(); setView(Object.keys(VIEWS)[+e.key - 1]); return; }
-    if (e.key === "Escape") {
-      if (document.activeElement === $("#filter")) $("#filter").blur();
-      else if (state.sel[state.view]) { state.sel[state.view] = null; movePill(); renderMain(); }
-      return;
-    }
-    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && state.view !== "graph") {
-      const rows = sortedFiltered();
-      if (!rows.length) return;
-      e.preventDefault();
-      const i = rows.findIndex((r) => r.id === state.sel[state.view]);
-      const next = e.key === "ArrowDown" ? Math.min(rows.length - 1, i + 1) : Math.max(0, i < 0 ? 0 : i - 1);
-      select(rows[next].id);
+    const k = e.key.toLowerCase();
+    if (ctrl && (k === "k" || k === "p")) { e.preventDefault(); openPalette(); }
+    else if (ctrl && k === "r") { e.preventDefault(); if (!state.scanning) load(true); }
+    else if (ctrl && /^[1-7]$/.test(e.key)) { e.preventDefault(); go(PAGES[+e.key - 1][0]); }
+    else if (e.key === "Escape" || (e.key === "Backspace" && !/input/i.test(document.activeElement?.tagName))) {
+      if (state.detail) { state.detail = null; render(); }
+      else if (state.page === "overview" && burst.focus?.parent) burst.zoom(burst.focus.parent);
+      else if (state.explore[state.page]?.length) { state.explore[state.page].pop(); render(); }
     }
   });
 
-  // Sidebar width, remembered.
-  const side = $("#sidebar");
-  const saved = +store("strata.sidebar");
-  if (saved >= 200 && saved <= 520) side.style.width = saved + "px";
-  const rz = $("#resizer");
-  rz.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    rz.classList.add("dragging");
-    const x0 = e.clientX, w0 = side.offsetWidth;
-    const move = (ev) => (side.style.width = Math.min(520, Math.max(200, w0 + ev.clientX - x0)) + "px");
-    const up = () => {
-      rz.classList.remove("dragging");
-      store("strata.sidebar", side.offsetWidth);
-      movePill(false);
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  });
-
-  // Drag a file or folder in: which app is it?
   const drop = $("#drop");
   listen("tauri://drag-enter", () => drop.classList.add("show"));
   listen("tauri://drag-leave", () => drop.classList.remove("show"));
@@ -989,32 +861,23 @@ function wire() {
     if (!state.inv) return toast("Still scanning: try again in a moment.");
     try {
       const w = await invoke("why", { path });
-      if (!w) return toast(`<b>${esc(leaf(path))}</b> is outside the folders Strata maps to apps.`, 5000);
+      if (!w) return toast(`<b>${esc(leaf(path))}</b> isn't in an app's folder. Look for it under Your files or Windows.`, 5000);
       if (w.app) {
         const a = state.inv.apps.find((x) => x.app.name === w.app);
-        await setView("apps");
-        if (a) select(a.app.id, { flashPath: w.part });
-        toast(`<b>${esc(leaf(path))}</b> belongs to <b>${esc(w.app)}</b>`, 4000);
+        if (a) openApp(a.app.id, w.part);
+        toast(`<b>${esc(leaf(path))}</b> belongs to <b>${esc(w.app)}</b>`, 4500);
       } else {
-        await setView("unclaimed");
-        select(w.part);
-        toast(`<b>${esc(leaf(path))}</b> isn't claimed by any installed app`, 4000);
+        state.onlyLikely = false;
+        go("leftovers");
+        toast(`<b>${esc(leaf(path))}</b> isn't claimed by any installed app`, 4500);
       }
-    } catch (err) {
-      toast(esc(err));
-    }
+    } catch (err) { toast(esc(err)); }
   });
-
-  listen("scan-progress", (ev) => {
-    state.progress = ev.payload;
-    renderStatus();
-  });
+  listen("scan-progress", (ev) => { state.progress = ev.payload; renderSide(); });
 }
-
-// --------------------------------------------------------------- start
 
 document.documentElement.dataset.theme = store("strata.theme") || "dark";
 wire();
 render();
 invoke("ui_ready").catch(() => {});
-loadInventory(false);
+load(false);
